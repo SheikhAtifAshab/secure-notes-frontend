@@ -1,0 +1,156 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Secure Notes</title>
+<style>
+body{font-family:sans-serif;max-width:900px;margin:20px auto;padding:0 10px}
+section{border:1px solid #ccc;padding:10px;margin:10px 0}
+input,textarea,select{display:block;margin:4px 0;width:100%;box-sizing:border-box}
+button{margin:2px}li{margin:6px 0}#msg{color:red;min-height:1.2em}
+</style></head><body>
+<h2>Secure Notes</h2><div id="msg"></div>
+
+<section id="auth">
+  <h3>Login / Register</h3>
+  <input id="name" placeholder="Name (register only)">
+  <input id="email" placeholder="Email">
+  <input id="password" type="password" placeholder="Password (min 8)">
+  <input id="interests" placeholder="Interests, comma separated (register only)">
+  <button onclick="login()">Login</button><button onclick="register()">Register</button>
+</section>
+
+<div id="app" hidden>
+  <p>Logged in as <b id="who"></b> <button onclick="logout()">Logout</button></p>
+
+  <section>
+    <h3>Notes <small id="notesHint"></small></h3>
+    <input id="nTitle" placeholder="Title"><textarea id="nContent" placeholder="Content"></textarea>
+    <button onclick="addNote()">Add note</button>
+    <input id="ownerFilter" placeholder="Admin: filter by owner user id" hidden>
+    <button id="ownerBtn" onclick="loadNotes(1)" hidden>Apply filter</button>
+    <ul id="notes"></ul><div id="notesPager"></div>
+  </section>
+
+  <section>
+    <h3>Posts (public)</h3>
+    <input id="pTitle" placeholder="Post title"><textarea id="pContent" placeholder="Post content"></textarea>
+    <button onclick="addPost()">Publish post</button>
+    <input id="postUser" placeholder="User id (to see that user's posts)">
+    <button onclick="loadPosts(1)">Show user's posts</button>
+    <ul id="posts"></ul><div id="postsPager"></div>
+  </section>
+
+  <section id="admin" hidden>
+    <h3>Admin: users</h3>
+    <input id="uName" placeholder="Name"><input id="uEmail" placeholder="Email">
+    <input id="uPass" type="password" placeholder="Password"><input id="uInt" placeholder="Interests (comma separated)">
+    <select id="uRole"><option>user</option><option>admin</option></select>
+    <button onclick="addUser()">Add user</button>
+    <ul id="users"></ul><div id="usersPager"></div>
+    <h3>Users grouped by interests</h3>
+    <button onclick="loadGroups(1)">Load</button>
+    <ul id="groups"></ul><div id="groupsPager"></div>
+  </section>
+</div>
+
+<script src="config.js"></script>
+<script>
+const API_BASE = (window.API_BASE || 'http://localhost:3000').replace(/\/$/, '');
+let token = localStorage.getItem('token'), me = null;
+const $ = (id) => document.getElementById(id);
+const csv = (v) => v.split(',').map((s) => s.trim()).filter(Boolean);
+
+async function api(path, method = 'GET', body) {
+  const r = await fetch(API_BASE + '/api' + path, {
+    method, body: body ? JSON.stringify(body) : undefined,
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { $('msg').textContent = d.message || 'Error ' + r.status; throw new Error(d.message); }
+  $('msg').textContent = '';
+  return d;
+}
+function item(list, text, buttons = []) {
+  const li = document.createElement('li'); li.append(text + ' ');
+  buttons.forEach(([label, fn]) => { const b = document.createElement('button'); b.textContent = label; b.onclick = fn; li.append(b); });
+  list.append(li);
+}
+function pager(id, p, fn) {
+  const c = $(id); c.textContent = '';
+  const b1 = document.createElement('button'); b1.textContent = 'Prev'; b1.disabled = p.page <= 1; b1.onclick = () => fn(p.page - 1);
+  const b2 = document.createElement('button'); b2.textContent = 'Next'; b2.disabled = p.page >= p.totalPages; b2.onclick = () => fn(p.page + 1);
+  c.append(b1, ` page ${p.page}/${p.totalPages || 1} (${p.total} total) `, b2);
+}
+
+async function auth(path, body) {
+  const d = await api('/auth/' + path, 'POST', body);
+  token = d.token; localStorage.setItem('token', token); start();
+}
+const login = () => auth('login', { email: $('email').value, password: $('password').value });
+const register = () => auth('register', { name: $('name').value, email: $('email').value, password: $('password').value, interests: csv($('interests').value) });
+function logout() { token = null; localStorage.removeItem('token'); location.reload(); }
+
+async function start() {
+  try { me = await api('/auth/me'); } catch { return; }
+  $('auth').hidden = true; $('app').hidden = false;
+  $('who').textContent = `${me.name} (${me.role}) id=${me._id}`;
+  const admin = me.role === 'admin';
+  $('admin').hidden = !admin; $('ownerFilter').hidden = !admin; $('ownerBtn').hidden = !admin;
+  $('notesHint').textContent = admin ? '(you see everyone\'s notes)' : '(your notes)';
+  $('postUser').value = me._id;
+  loadNotes(1); loadPosts(1); if (admin) loadUsers(1);
+}
+
+// ----- notes -----
+async function loadNotes(page) {
+  const owner = $('ownerFilter').value.trim();
+  const d = await api(`/notes?page=${page}&limit=5` + (owner ? '&owner=' + owner : ''));
+  $('notes').textContent = '';
+  d.data.forEach((n) => {
+    const mine = n.owner === me._id;
+    item($('notes'), `${n.title}: ${n.content}` + (me.role === 'admin' ? ` [owner ${n.owner}]` : ''),
+      mine ? [['Edit', async () => { const t = prompt('Title', n.title); const c = prompt('Content', n.content); if (t && c) { await api('/notes/' + n._id, 'PUT', { title: t, content: c }); loadNotes(page); } }],
+              ['Delete', async () => { await api('/notes/' + n._id, 'DELETE'); loadNotes(page); }]] : []);
+  });
+  pager('notesPager', d.pagination, loadNotes);
+}
+async function addNote() {
+  await api('/notes', 'POST', { title: $('nTitle').value, content: $('nContent').value });
+  $('nTitle').value = $('nContent').value = ''; loadNotes(1);
+}
+
+// ----- posts -----
+async function loadPosts(page) {
+  const uid = $('postUser').value.trim();
+  const d = await api(uid ? `/posts/user/${uid}?page=${page}&limit=5` : `/posts?page=${page}&limit=5`);
+  $('posts').textContent = '';
+  d.data.forEach((p) => item($('posts'), `${p.title}: ${p.content}`, p.author === me._id ? [['Delete', async () => { await api('/posts/' + p._id, 'DELETE'); loadPosts(page); }]] : []));
+  pager('postsPager', d.pagination, loadPosts);
+}
+async function addPost() {
+  await api('/posts', 'POST', { title: $('pTitle').value, content: $('pContent').value });
+  $('pTitle').value = $('pContent').value = ''; loadPosts(1);
+}
+
+// ----- admin -----
+async function loadUsers(page) {
+  const d = await api(`/users?page=${page}&limit=5`);
+  $('users').textContent = '';
+  d.data.forEach((u) => item($('users'), `${u.name} <${u.email}> ${u.role} [${u.interests.join(', ')}] id=${u._id}`, [
+    ['Toggle role', async () => { await api('/users/' + u._id, 'PUT', { role: u.role === 'admin' ? 'user' : 'admin' }); loadUsers(page); }],
+    ['Rename', async () => { const n = prompt('New name', u.name); if (n) { await api('/users/' + u._id, 'PUT', { name: n }); loadUsers(page); } }],
+    ['Delete', async () => { if (confirm('Delete user and their data?')) { await api('/users/' + u._id, 'DELETE'); loadUsers(page); } }],
+  ]));
+  pager('usersPager', d.pagination, loadUsers);
+}
+async function addUser() {
+  await api('/users', 'POST', { name: $('uName').value, email: $('uEmail').value, password: $('uPass').value, role: $('uRole').value, interests: csv($('uInt').value) });
+  loadUsers(1);
+}
+async function loadGroups(page) {
+  const d = await api(`/users/grouped/interests?page=${page}&limit=5`);
+  $('groups').textContent = '';
+  d.data.forEach((g) => item($('groups'), `${g._id} (${g.count}): ` + g.users.map((u) => u.name).join(', ')));
+  pager('groupsPager', d.pagination, loadGroups);
+}
+
+if (token) start();
+</script></body></html>
